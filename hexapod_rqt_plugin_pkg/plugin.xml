@@ -1,0 +1,20 @@
+<library path="src">
+  <class 
+    name="HexapodController"
+    type="hexapod_rqt.hexapod_controller.HexapodController"
+    base_class_type="rqt_gui_py::Plugin">
+    <description>
+      A plugin for controlling hexapod robot.
+    </description>
+    <qtgui>
+      <group>
+        <label>Hexapod Controller</label>
+        <icon type="theme">folder</icon>
+        <statustip>Hexapod Controller</statustip>
+      </group>
+      <label>Hexapod Controller</label>
+      <icon type="theme">utilities-system-monitor</icon>
+      <statustip>Hexapod Controller</statustip>
+    </qtgui>
+  </class>
+</library>
