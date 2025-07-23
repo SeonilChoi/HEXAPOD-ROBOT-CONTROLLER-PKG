@@ -17,8 +17,8 @@ from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy, QoSDur
 from sensor_msgs.msg import JointState
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
-from hexapod_rqt.hexapod_kinematics import load_hexapod_robot
-from hexapod_rqt.hexapod_planner import Polynomial_with_waypoint, LSPB
+from hexapod_rqt.hexapod_kinematics import forward_kinematics_2, get_base_axis
+from hexapod_rqt.hexapod_planner import homing, walking
 
 PI = 3.141592653589793
 
@@ -44,44 +44,47 @@ class HexapodWidget(QMainWindow):
             )
             raise
 
+        self.update_timer = QTimer(self)
+        self.update_timer.timeout.connect(self.update_indicators)
+        self.update_timer.start(20)
+        
         self.node = node
         self.joint_state_subscriber = self.node.create_subscription(
             JointState, 'joint_states',
             self.joint_state_callback, self.QOS_REKL5V
         )
-
-        self.update_timer = QTimer(self)
-        self.update_timer.timeout.connect(self.update_indicators)
-        self.update_timer.start(10)
-
-        self.hexapod = load_hexapod_robot()
+        self.joint_trajectory_publisher = self.node.create_publisher(
+            JointTrajectory, 'joint_trajectory', self.QOS_REKL5V
+        )
 
         self.lines = {}
         self.scatters = {}
         self.axis = {}
 
-        self.theta_lists = np.zeros((6, 3))
         self.pose = np.zeros((2, 3))
         self.pose[1, -1] = 0.455025253
         self.home_joint_positions = np.array([
-            [0.0, -np.deg2rad(45), -np.deg2rad(135)],
-            [0.0, -np.deg2rad(45), -np.deg2rad(135)],
-            [0.0, -np.deg2rad(45), -np.deg2rad(135)],
-            [0.0,  np.deg2rad(45),  np.deg2rad(135)],
-            [0.0,  np.deg2rad(45),  np.deg2rad(135)],
-            [0.0,  np.deg2rad(45),  np.deg2rad(135)]
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+            -np.deg2rad(45), -np.deg2rad(45), -np.deg2rad(45),
+             np.deg2rad(45),  np.deg2rad(45),  np.deg2rad(45),
+            -np.deg2rad(135), -np.deg2rad(135), -np.deg2rad(135),
+             np.deg2rad(135),  np.deg2rad(135),  np.deg2rad(135)
         ])
-        self.joint_positions = self.home_joint_positions.reshape(18)
+        
+        self.joint_positions = None
+        self.joint_name = None
 
         self.trajectory = None
+        self.base_trajectory = None
         self.traj_index = 0
         
-        self.START = False
-        self.STOP = False
-        self.HOME = False
-        self.UP = False
-        self.DOWN = False
+        self.stride   = 0
+        self.duration = 0
+        self.goal_x   = 0
+        self.goal_y   = 0
+        self.goal_z   = 0
 
+        self.MOVING = False
         self.initialize_ui()
 
     def initialize_ui(self):
@@ -94,23 +97,23 @@ class HexapodWidget(QMainWindow):
         first_tab_layout = QVBoxLayout(first_tab)
 
         robot_monitor = QGroupBox("Robot Monitor", first_tab)
-        robot_monitor.setMinimumSize(600, 600)
         robot_monitor_layout = QVBoxLayout(robot_monitor)
 
         self.robot_plot_widget = gl.GLViewWidget()
+        self.robot_plot_widget.setMinimumSize(300, 500)
         self.robot_plot_widget.setBackgroundColor(pg.mkColor('k'))
         zgrid = gl.GLGridItem(color=(150, 150, 150, 100))
         self.robot_plot_widget.addItem(zgrid)
 
-        self.hexapod.update_dh_params_list(self.home_joint_positions)
-        positions = self.hexapod.forward_kinematics(self.pose)
+        positions = forward_kinematics_2(self.pose, self.home_joint_positions, True)
         for idx, pos in enumerate(positions):
-            self.lines[f'leg{idx+1}'] = gl.GLLinePlotItem(pos=pos, color=(0.5, 0.5, 0.5, 1.0), width=5.0)
+            self.lines[f'leg{idx+1}'] = gl.GLLinePlotItem(
+                pos=pos, color=(0.5, 0.5, 0.5, 1.0), width=5.0)
             self.scatters[f'leg{idx+1}'] = gl.GLScatterPlotItem(pos=pos, size=10.0)
             self.robot_plot_widget.addItem(self.lines[f'leg{idx+1}'])
             self.robot_plot_widget.addItem(self.scatters[f'leg{idx+1}'])
 
-        axis = self.hexapod.robot['leg1'].get_base_axis(self.pose)
+        axis = get_base_axis(self.pose)
         self.axis['x'] = gl.GLLinePlotItem(pos=axis[0], color=(1.0, 0.0, 0.0, 1.0), width=5.0)
         self.axis['y'] = gl.GLLinePlotItem(pos=axis[1], color=(0.0, 1.0, 0.0, 1.0), width=5.0)
         self.axis['z'] = gl.GLLinePlotItem(pos=axis[2], color=(0.0, 0.0, 1.0, 1.0), width=5.0)
@@ -132,7 +135,8 @@ class HexapodWidget(QMainWindow):
         self.stride_slider.valueChanged.connect(
             self.on_stride_slider_changed
         )
-        self.max_stride_label = QLabel()
+        self.stride_slider.setRange(0, 20)
+        self.max_stride_label = QLabel("0.2 m")
         self.max_stride_label.setFixedWidth(80)
 
         stride_layout.addWidget(self.cur_stride_label)
@@ -148,28 +152,42 @@ class HexapodWidget(QMainWindow):
         self.duration_slider.valueChanged.connect(
             self.on_duration_slider_changed
         )
-        self.max_duration_label = QLabel()
+        self.duration_slider.setRange(0, 50)
+        self.max_duration_label = QLabel("10 s")
         self.max_duration_label.setFixedWidth(80)
 
         duration_layout.addWidget(self.cur_duration_label)
         duration_layout.addWidget(self.duration_slider)
         duration_layout.addWidget(self.max_duration_label)
 
-        steps_widget = QWidget()
-        steps_layout = QHBoxLayout(steps_widget)
+        position_widget = QWidget()
+        position_layout = QHBoxLayout(position_widget)
         
-        self.cur_steps_label = QLabel("Current Steps:    ")
-        self.cur_steps_label.setFixedWidth(330)
-        self.steps_slider = QSlider(Qt.Horizontal)
-        self.steps_slider.valueChanged.connect(
-            self.on_steps_slider_changed
-        )
-        self.max_steps_label = QLabel()
-        self.max_steps_label.setFixedWidth(80)
-
-        steps_layout.addWidget(self.cur_steps_label)
-        steps_layout.addWidget(self.steps_slider)
-        steps_layout.addWidget(self.max_steps_label)
+        self.cur_position_label = QLabel("Current Position(m): ")
+        self.cur_position_label.setFixedWidth(300)
+        self.cur_x_label = QLabel("0.0")
+        self.cur_x_label.setMaximumSize(80, 20)
+        self.cur_y_label = QLabel("0.0")
+        self.cur_y_label.setMaximumSize(80, 20)
+        self.cur_z_label = QLabel("0.0")
+        self.cur_z_label.setMaximumSize(80, 20)
+        self.goal_position_label = QLabel("Goal Position(m): ")
+        self.goal_position_label.setFixedWidth(300)
+        self.goal_x_text = QPlainTextEdit()
+        self.goal_x_text.setMaximumSize(80, 30)
+        self.goal_y_text = QPlainTextEdit()
+        self.goal_y_text.setMaximumSize(80, 30)
+        self.goal_z_text = QPlainTextEdit()
+        self.goal_z_text.setMaximumSize(80, 30)
+        
+        position_layout.addWidget(self.cur_position_label)
+        position_layout.addWidget(self.cur_x_label)
+        position_layout.addWidget(self.cur_y_label)
+        position_layout.addWidget(self.cur_z_label)
+        position_layout.addWidget(self.goal_position_label)
+        position_layout.addWidget(self.goal_x_text)
+        position_layout.addWidget(self.goal_y_text)
+        position_layout.addWidget(self.goal_z_text)
 
         mode_widget = QWidget()
         mode_layout = QHBoxLayout(mode_widget)
@@ -182,6 +200,7 @@ class HexapodWidget(QMainWindow):
         self.stop_button.clicked.connect(
             self.on_stop_button_clicked
         )
+        self.stop_button.setDisabled(True)
         self.home_button = QPushButton("Home")
         self.home_button.clicked.connect(
             self.on_home_button_clicked
@@ -203,7 +222,7 @@ class HexapodWidget(QMainWindow):
 
         robot_controller_layout.addWidget(stride_widget)
         robot_controller_layout.addWidget(duration_widget)
-        robot_controller_layout.addWidget(steps_widget)
+        robot_controller_layout.addWidget(position_widget)
         robot_controller_layout.addWidget(mode_widget)
 
         first_tab_layout.addWidget(robot_monitor)
@@ -212,52 +231,45 @@ class HexapodWidget(QMainWindow):
         self.q_tab_widget.addTab(first_tab, "Hexapod Robot Controller")
 
     def on_stride_slider_changed(self, value):
-        pass
+        self.stride = value * 0.01
+        self.cur_stride_label.setText(f"Current Stride:   {self.stride:.2f} m")
 
     def on_duration_slider_changed(self, value):
-        pass
-
-    def on_steps_slider_changed(self, value):
-        pass
+        self.duration = value * 0.2
+        self.cur_duration_label.setText(f"Current Duration:   {self.duration:.1f} s")
 
     def on_start_button_clicked(self):
-        pass
+        if self.stride == 0 or self.duration == 0:
+            return
+
+        if self.goal_x == "" or self.goal_y == "" or self.goal_z == "":
+            return
+        
+        self.moving(True)
+        
+        cur_pose = self.pose[1].copy()
+        cur_pose[-1] = 0.0
+        goal_pose = np.array([float(self.goal_x), float(self.goal_y), float(self.goal_z)])
+        
+        self.trajectory, self.base_trajectory, real_goal_pose = walking(
+             self.home_joint_positions, cur_pose, goal_pose, self.stride, self.duration)
+        self.base_trajectory[:, -1] *= -1
 
     def on_stop_button_clicked(self):
-        pass
+        self.trajectory = None
+        self.base_trajectory = None
+        self.traj_index = 0
 
+        self.moving(False)
+        
     def on_home_button_clicked(self):
-        start_joint_positions_1 = self.joint_positions.copy()
-        self.hexapod.update_dh_params_list(start_joint_positions_1.reshape(6, 3))
-        start_link_positions_1 = self.hexapod.forward_kinematics(self.pose, is_world=False)[:, -1, :].reshape(6, 3)
+        self.moving(True)
 
-        leg_list_1 = [0, 2, 4]
-        way_link_positions_1 = start_link_positions_1.copy()
-        way_link_positions_1[leg_list_1, -1] += 0.15
-        way_joint_positions_1 = self.hexapod.inverse_kinematics(way_link_positions_1)
-        
-        end_joint_positions_1 = way_joint_positions_1.copy()
-        end_joint_positions_1[leg_list_1] = self.home_joint_positions[leg_list_1]
-        
-        self.hexapod.update_dh_params_list(end_joint_positions_1.reshape(6, 3))
-        start_link_positions_2 = self.hexapod.forward_kinematics(self.pose, is_world=False)[:, -1, :].reshape(6, 3)
-        start_joint_positions_2 = self.hexapod.inverse_kinematics(start_link_positions_2)
-        
-        leg_list_2 = [1, 3, 5]
-        way_link_positions_2 = start_link_positions_2.copy()
-        way_link_positions_2[leg_list_2, -1] += 0.15
-        way_joint_positions_2 = self.hexapod.inverse_kinematics(way_link_positions_2)
-        
-        end_joint_positions_2 = way_joint_positions_2.copy()
-        end_joint_positions_2[leg_list_2] = self.home_joint_positions[leg_list_2]
-
-        traj_1 = Polynomial_with_waypoint(
-            start_joint_positions_1.reshape(18), way_joint_positions_1.reshape(18), end_joint_positions_1.reshape(18), 2.0
-        )
-        traj_2 = Polynomial_with_waypoint(
-            start_joint_positions_2.reshape(18), way_joint_positions_2.reshape(18), end_joint_positions_2.reshape(18), 2.0
-        )
-        self.trajectory = np.concatenate((traj_1, traj_2), axis=0)
+        cur_pose = self.pose[1].copy()
+        cur_pose[-1] = 0.0
+        self.trajectory, self.base_trajectory = homing(
+            self.home_joint_positions, self.home_joint_positions, cur_pose, 4.0)
+        self.base_trajectory[:, -1] *= -1
         self.HOME = True
 
     def on_up_button_clicked(self):
@@ -267,28 +279,85 @@ class HexapodWidget(QMainWindow):
         pass
 
     def joint_state_callback(self, msg):
-        self.joint_positions = msg.positions
+        self.joint_names = np.array([name for name in msg.name])
+        self.joint_positions = np.array([pos for pos in msg.position])
+        self.joint_positions = self.joint_positions.reshape(6, 3)
+        self.joint_positions = self.joint_positions.T
+        self.joint_positions = self.joint_positions.reshape(18)
 
     def update_indicators(self):
+        self.goal_x = self.goal_x_text.toPlainText()
+        self.goal_y = self.goal_y_text.toPlainText()
+        self.goal_z = self.goal_z_text.toPlainText()
+
         if self.trajectory is not None:
-            self.plot_robot(self.trajectory[self.traj_index].reshape(6, 3))
+            joint_positions = self.trajectory[self.traj_index]
+            self.pose[1] = self.base_trajectory[self.traj_index].copy()
+            self.plot_robot(joint_positions)
             self.traj_index += 1
+            
+            """
+            traj = JointTrajectory()
+            traj.joint_names = [name for name in self.joint_names]
+            point = JointTrajectoryPoint()
+            msg_joint_positions = joint_positions.reshape(3, 6)
+            msg_joint_positions = msg_joint_positions.T
+            msg_joint_positions = msg_joint_positions.reshape(18)
+            point.positions = [pos for pos in msg_joint_positions]
+            traj.points.append(point)
+            self.joint_trajectory_publisher.publish(traj)
+            """
+            
+            self.cur_x_label.setText(f"{self.pose[1, 0]:.3f}")
+            self.cur_y_label.setText(f"{self.pose[1, 1]:.3f}")
+            self.cur_z_label.setText(f"{self.pose[1, 2]:.3f}")
 
             if self.trajectory.shape[0] <= self.traj_index:
+                self.MOVING = False
+
                 self.trajectory = None
+                self.base_trajectory = None
                 self.traj_index = 0
-    
+                
+                self.moving(False)
+
     def plot_robot(self, theta_lists):
-        self.hexapod.update_dh_params_list(theta_lists)
-        positions = self.hexapod.forward_kinematics(self.pose)
+        positions = forward_kinematics_2(self.pose, theta_lists, True)
         for idx, pos in enumerate(positions):
             self.lines[f'leg{idx+1}'].setData(pos=pos)
             self.scatters[f'leg{idx+1}'].setData(pos=pos)
         
-        axis = self.hexapod.robot['leg1'].get_base_axis(self.pose)
+        axis = get_base_axis(self.pose)
         self.axis['x'].setData(pos=axis[0])
         self.axis['y'].setData(pos=axis[1])
         self.axis['z'].setData(pos=axis[2])
+
+    def moving(self, flag):
+        if flag:
+            self.stride_slider.setDisabled(True)
+            self.duration_slider.setDisabled(True)
+            self.start_button.setDisabled(True)
+            self.stop_button.setEnabled(True)
+            self.home_button.setDisabled(True)
+            self.up_button.setDisabled(True)
+            self.down_button.setDisabled(True)
+            self.goal_x_text.setDisabled(True)
+            self.goal_y_text.setDisabled(True)
+            self.goal_z_text.setDisabled(True)
+        else:
+            self.stride_slider.setEnabled(True)
+            self.duration_slider.setEnabled(True)
+            self.start_button.setEnabled(True)
+            self.stop_button.setDisabled(True)
+            self.home_button.setEnabled(True)
+            self.up_button.setEnabled(True)
+            self.down_button.setEnabled(True)
+            self.goal_x_text.setEnabled(True)
+            self.goal_y_text.setEnabled(True)
+            self.goal_z_text.setEnabled(True)
+            self.goal_x_text.setPlainText("")
+            self.goal_y_text.setPlainText("")
+            self.goal_z_text.setPlainText("")
 
     def shutdown_widget(self):
         self.node.destroy_node()
