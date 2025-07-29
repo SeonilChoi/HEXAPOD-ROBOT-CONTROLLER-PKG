@@ -1,0 +1,9 @@
+#!/usr/bin/env python3
+
+import sys
+from rqt_gui.main import Main
+from robot_rqt.robot_rqt_controller import RobotRQtController
+
+plugin = 'robot_rqt.robot_rqt_controller.RobotRQtController'
+main = Main(filename=plugin)
+sys.exit(main.main(standalone=plugin))

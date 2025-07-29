@@ -1,17 +1,17 @@
-from hexapod_rqt.hexapod_widget import HexapodWidget
+from robot_rqt.robot_rqt_widget import RobotRQtWidget
 from rqt_gui_py.plugin import Plugin
 
-class HexapodController(Plugin):
+class RobotRQtController(Plugin):
     def __init__(self, context):
         super().__init__(context)
-        
-        self.setObjectName('HexapodController')
-        self.widget = HexapodWidget(context.node)
+
+        self.setObjectName('RobotRQtController')
+        self.widget = RobotRQtWidget(context.node)
         serial_number = context.serial_number()
         if serial_number >= 1:
             self.widget.setWindowTitle(self.widget.windowTitle() + ' ({0})'.format(serial_number))
         context.add_widget(self.widget)
 
     def shutdown_plugin(self):
-        print('Shutdown the RQt.')
+        print("\n[RobotRQtController::shutdown_plugin] Shutdown the Robot RQt Controller.")
         self.widget.shutdown_widget()
