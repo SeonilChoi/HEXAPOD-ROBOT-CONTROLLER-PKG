@@ -61,12 +61,12 @@ class RobotRQtWidget(QMainWindow):
         self.axis = {}
 
         self.home_pose = np.array([[0, 0, 0], [0, 0, 5.45129330e-01]])
-        self.home_joint_positions = np.array([0.0, -np.deg2rad(45), -np.deg2rad(135),
-                                              0.0, -np.deg2rad(45), -np.deg2rad(135),
-                                              0.0, -np.deg2rad(45), -np.deg2rad(135),
-                                              0.0,  np.deg2rad(45),  np.deg2rad(135),
-                                              0.0,  np.deg2rad(45),  np.deg2rad(135),
-                                              0.0,  np.deg2rad(45),  np.deg2rad(135)])
+        self.home_joint_positions = np.array([0.0, -np.deg2rad(45), np.deg2rad(135),
+                                              0.0, -np.deg2rad(45), np.deg2rad(135),
+                                              0.0, -np.deg2rad(45), np.deg2rad(135),
+                                              0.0,  np.deg2rad(45), -np.deg2rad(135),
+                                              0.0,  np.deg2rad(45), -np.deg2rad(135),
+                                              0.0,  np.deg2rad(45), -np.deg2rad(135)])
 
         self.base_traj = None
         self.foot_traj = None
@@ -385,6 +385,14 @@ class RobotRQtWidget(QMainWindow):
             
             if self.is_plotting:
                 self.plot_robot()
+
+            traj_msg = JointTrajectory()
+            traj_msg.joint_names = ['j_11', 'j_12', 'j_13', 'j_21', 'j_22', 'j_23',
+                                    'j_31', 'j_32', 'j_33', 'j_41', 'j_42', 'j_43',
+                                    'j_51', 'j_52', 'j_53', 'j_61', 'j_62', 'j_63']
+            traj_msg.points.append(JointTrajectoryPoint())
+            traj_msg.points[0].positions = [pos for pos in self.motion_params['current_positions']]
+            self.joint_trajectory_publisher.publish(traj_msg)
 
             if self.base_traj.shape[0] <= self.traj_idx:
                 self.base_traj = None
